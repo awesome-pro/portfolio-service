@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from app.core.config import get_settings
+from app.core.rate_limit import orchflow_rate_limiter
 from app.main import app
 from httpx import ASGITransport, AsyncClient
 
@@ -16,7 +17,9 @@ from httpx import ASGITransport, AsyncClient
 def fake_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    monkeypatch.setenv("DEMOS_API_ORCHFLOW_RATE_LIMIT_MAX_RUNS", "100")
     get_settings.cache_clear()
+    orchflow_rate_limiter.reset()
 
     calls: list[dict[str, Any]] = []
 
@@ -31,6 +34,10 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> None:
         "litellm",
         SimpleNamespace(acompletion=acompletion, calls=calls),
     )
+
+
+def _litellm_calls() -> list[dict[str, Any]]:
+    return sys.modules["litellm"].calls
 
 
 async def _stream_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -133,6 +140,7 @@ async def test_orchflow_success_streams_parallel_traces_and_result() -> None:
         {
             "topic": "AI code review assistant",
             "audience": "engineering managers",
+            "constraints": "Show exactly why traces and resume matter.",
             "mode": "success",
         }
     )
@@ -158,6 +166,141 @@ async def test_orchflow_success_streams_parallel_traces_and_result() -> None:
     assert final_result["success"] is True
     assert final_result["output"]["status"] == "publish_ready"
     assert final_result["output"]["audience"] == "engineering managers"
+    assert final_result["output"]["models"]["preset"] == "balanced"
+    assert any("response_format" in call for call in _litellm_calls())
+
+
+@pytest.mark.asyncio
+async def test_orchflow_uses_app_specific_provider_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-global-openai-key")
+    monkeypatch.setenv("DEMOS_API_OPENAI_API_KEY", "demo-specific-openai-key")
+    get_settings.cache_clear()
+
+    await _stream_events(
+        {
+            "topic": "AI code review assistant",
+            "audience": "engineering managers",
+            "mode": "success",
+        }
+    )
+
+    openai_calls = [
+        call for call in _litellm_calls() if call["model"] == "openai/o4-mini"
+    ]
+    assert openai_calls
+    assert {call["api_key"] for call in openai_calls} == {
+        "demo-specific-openai-key"
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchflow_o4_mini_preset_does_not_require_anthropic_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("DEMOS_API_ANTHROPIC_API_KEY", "")
+    get_settings.cache_clear()
+
+    events = await _stream_events(
+        {
+            "topic": "AI code review assistant",
+            "audience": "engineering managers",
+            "mode": "success",
+            "model_preset": "o4_mini_only",
+        }
+    )
+
+    assert events[-1]["final_result"]["success"] is True
+    models = {call["model"] for call in _litellm_calls()}
+    assert models == {"openai/o4-mini"}
+
+
+@pytest.mark.asyncio
+async def test_orchflow_recovers_when_llm_first_returns_plain_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def acompletion(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        prompt = kwargs["messages"][1]["content"]
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "A practical plan would cover positioning and proof."
+                            )
+                        }
+                    }
+                ]
+            }
+        content = _fake_json_content(prompt)
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(acompletion=acompletion, calls=calls),
+    )
+
+    events = await _stream_events(
+        {
+            "topic": "AI code review assistant",
+            "audience": "engineering managers",
+            "mode": "success",
+            "model_preset": "haiku_only",
+        }
+    )
+
+    assert events[-1]["type"] == "flow_completed"
+    assert events[-1]["final_result"]["success"] is True
+    assert len(calls) > 6
+
+
+@pytest.mark.asyncio
+async def test_orchflow_repairs_json_before_step_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def acompletion(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        prompt = kwargs["messages"][1]["content"]
+        if len(calls) <= 3:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Use Orchflow to show readable orchestration."
+                        }
+                    }
+                ]
+            }
+        content = _fake_json_content(prompt)
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(acompletion=acompletion, calls=calls),
+    )
+
+    events = await _stream_events(
+        {
+            "topic": "AI code review assistant",
+            "audience": "engineering managers",
+            "mode": "success",
+            "model_preset": "haiku_only",
+        }
+    )
+
+    assert events[-1]["type"] == "flow_completed"
+    assert "step_failed" not in _event_types(events)
+    assert len(calls) > 8
 
 
 @pytest.mark.asyncio
@@ -196,8 +339,10 @@ async def test_orchflow_failure_resume_streams_checkpoint_lifecycle() -> None:
 async def test_orchflow_run_requires_real_provider_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("DEMOS_API_OPENAI_API_KEY", "")
+    monkeypatch.setenv("DEMOS_API_ANTHROPIC_API_KEY", "")
     get_settings.cache_clear()
 
     transport = ASGITransport(app=app)
@@ -214,3 +359,27 @@ async def test_orchflow_run_requires_real_provider_keys(
     assert response.status_code == 503
     assert "OPENAI_API_KEY" in response.json()["detail"]
     assert "ANTHROPIC_API_KEY" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_orchflow_rate_limits_run_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEMOS_API_ORCHFLOW_RATE_LIMIT_MAX_RUNS", "1")
+    monkeypatch.setenv("DEMOS_API_ORCHFLOW_RATE_LIMIT_WINDOW_SECONDS", "60")
+    get_settings.cache_clear()
+    orchflow_rate_limiter.reset()
+
+    transport = ASGITransport(app=app, client=("203.0.113.10", 1234))
+    payload = {
+        "topic": "AI code review assistant",
+        "audience": "engineering managers",
+        "mode": "success",
+    }
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post("/demos/orchflow/run", json=payload)
+        second = await client.post("/demos/orchflow/run", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert "Retry-After" in second.headers

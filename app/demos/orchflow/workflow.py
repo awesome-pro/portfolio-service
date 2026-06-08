@@ -13,14 +13,131 @@ from orchflow import (
     FlowEvent,
     JsonCheckpointStore,
     StepContext,
+    StructuredOutputError,
     condition,
     step,
 )
 
 from app.core.config import Settings, get_settings
-from app.demos.orchflow.schemas import OrchflowRunMode, OrchflowRunRequest
+from app.demos.orchflow.schemas import (
+    OrchflowModelPreset,
+    OrchflowRunMode,
+    OrchflowRunRequest,
+)
 
 EventEnvelope = dict[str, Any]
+JSON_REPAIR_ATTEMPTS = 2
+
+PLAN_SCHEMA: dict[str, Any] = {
+    "title": "orchflow_plan",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "topic",
+        "audience",
+        "sections",
+        "tone",
+        "research_questions",
+        "model_note",
+    ],
+    "properties": {
+        "topic": {"type": "string"},
+        "audience": {"type": "string"},
+        "sections": {"type": "array", "items": {"type": "string"}},
+        "tone": {"type": "string"},
+        "research_questions": {"type": "array", "items": {"type": "string"}},
+        "model_note": {"type": "string"},
+    },
+}
+
+MARKET_RESEARCH_SCHEMA: dict[str, Any] = {
+    "title": "orchflow_market_research",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["angle", "pain", "audience_fit", "signals", "model_note"],
+    "properties": {
+        "angle": {"type": "string"},
+        "pain": {"type": "string"},
+        "audience_fit": {"type": "string"},
+        "signals": {"type": "array", "items": {"type": "string"}},
+        "model_note": {"type": "string"},
+    },
+}
+
+TECHNICAL_RESEARCH_SCHEMA: dict[str, Any] = {
+    "title": "orchflow_technical_research",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "core_value",
+        "mechanics",
+        "dependency_story",
+        "implementation_note",
+        "model_note",
+    ],
+    "properties": {
+        "core_value": {"type": "string"},
+        "mechanics": {"type": "array", "items": {"type": "string"}},
+        "dependency_story": {"type": "string"},
+        "implementation_note": {"type": "string"},
+        "model_note": {"type": "string"},
+    },
+}
+
+RISK_REVIEW_SCHEMA: dict[str, Any] = {
+    "title": "orchflow_risk_review",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["risk", "mitigation", "review_score", "model_note"],
+    "properties": {
+        "risk": {"type": "string"},
+        "mitigation": {"type": "string"},
+        "review_score": {"type": "number"},
+        "model_note": {"type": "string"},
+    },
+}
+
+SYNTHESIZE_SCHEMA: dict[str, Any] = {
+    "title": "orchflow_synthesize",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "headline",
+        "positioning",
+        "proof",
+        "risk",
+        "mitigation",
+        "quality_score",
+        "model_note",
+    ],
+    "properties": {
+        "headline": {"type": "string"},
+        "positioning": {"type": "string"},
+        "proof": {"type": "array", "items": {"type": "string"}},
+        "risk": {"type": "string"},
+        "mitigation": {"type": "string"},
+        "quality_score": {"type": "number"},
+        "model_note": {"type": "string"},
+    },
+}
+
+FINAL_SUMMARY_SCHEMA: dict[str, Any] = {
+    "title": "orchflow_final_summary",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "summary", "why_orchflow", "model_note"],
+    "properties": {
+        "status": {"type": "string"},
+        "summary": {"type": "string"},
+        "why_orchflow": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {"type": "string"},
+        },
+        "model_note": {"type": "string"},
+    },
+}
 
 
 def encode_ndjson(payload: EventEnvelope) -> str:
@@ -35,7 +152,7 @@ async def iter_orchflow_demo_events(
             yield event
         return
 
-    flow = build_launch_brief_flow()
+    flow = build_launch_brief_flow(model_preset=request.model_preset)
     async for event in flow.events(request.to_flow_input()):
         yield _event_envelope(event, phase="run")
 
@@ -45,7 +162,10 @@ async def _iter_failure_resume_events(
 ) -> AsyncIterator[EventEnvelope]:
     with tempfile.TemporaryDirectory(prefix="orchflow-demo-") as temporary_dir:
         store = JsonCheckpointStore(Path(temporary_dir) / "checkpoint.json")
-        flow = build_launch_brief_flow(fail_synthesize_once=True)
+        flow = build_launch_brief_flow(
+            model_preset=request.model_preset,
+            fail_synthesize_once=True,
+        )
 
         async for event in flow.events(
             request.to_flow_input(),
@@ -58,10 +178,19 @@ async def _iter_failure_resume_events(
             yield _event_envelope(event, phase="resume")
 
 
-def build_launch_brief_flow(*, fail_synthesize_once: bool = False) -> Flow:
+def build_launch_brief_flow(
+    *,
+    model_preset: OrchflowModelPreset = OrchflowModelPreset.balanced,
+    fail_synthesize_once: bool = False,
+) -> Flow:
     synthesize_calls = 0
     settings = get_settings()
-    haiku_agent, reasoning_agent = _build_agents(settings)
+    fast_model, reasoning_model = _models_for_preset(settings, model_preset)
+    fast_agent, reasoning_agent = _build_agents(
+        settings,
+        fast_model=fast_model,
+        reasoning_model=reasoning_model,
+    )
 
     @step(name="plan", retry=2)
     async def plan(input: dict[str, str], context: StepContext) -> dict[str, Any]:
@@ -70,14 +199,16 @@ def build_launch_brief_flow(*, fail_synthesize_once: bool = False) -> Flow:
         context.state["topic"] = topic
         context.state["audience"] = audience
         return await _run_json_agent(
-            haiku_agent,
+            fast_agent,
             context=context,
+            schema=PLAN_SCHEMA,
             prompt=f"""
 TASK: plan
 Create a compact launch-brief plan for this project demo.
 
 Topic: {topic}
 Audience: {audience}
+Constraints: {input["constraints"]}
 
 Return only JSON with keys:
 topic, audience, sections, tone, research_questions, model_note.
@@ -90,8 +221,9 @@ sections and research_questions must be arrays of strings.
         input: dict[str, str], context: StepContext
     ) -> dict[str, Any]:
         return await _run_json_agent(
-            haiku_agent,
+            fast_agent,
             context=context,
+            schema=MARKET_RESEARCH_SCHEMA,
             prompt=f"""
 TASK: market_research
 Act as a market researcher. Use the plan below to explain why an Orchflow demo
@@ -99,6 +231,7 @@ is useful for the audience.
 
 Topic: {input["topic"]}
 Audience: {input["audience"]}
+Constraints: {input["constraints"]}
 Plan: {json.dumps(context.previous)}
 
 Return only JSON with keys:
@@ -113,14 +246,16 @@ signals must be an array of short strings.
     ) -> dict[str, Any]:
         context.state["runtime_model"] = "sequential + parallel + conditional"
         return await _run_json_agent(
-            haiku_agent,
+            fast_agent,
             context=context,
+            schema=TECHNICAL_RESEARCH_SCHEMA,
             prompt=f"""
 TASK: technical_research
 Act as a Python framework engineer. Explain the concrete Orchflow mechanics
 that this live portfolio demo should expose.
 
 Topic: {input["topic"]}
+Constraints: {input["constraints"]}
 Plan: {json.dumps(context.previous)}
 
 Return only JSON with keys:
@@ -135,8 +270,9 @@ mechanics must be an array of strings.
     ) -> dict[str, Any]:
         context.state["risk_level"] = "medium"
         review = await _run_json_agent(
-            haiku_agent,
+            fast_agent,
             context=context,
+            schema=RISK_REVIEW_SCHEMA,
             prompt=f"""
 TASK: risk_review
 Act as a product reviewer. Identify one risk that would make the Orchflow
@@ -144,6 +280,7 @@ portfolio demo feel fake, and how to avoid it.
 
 Topic: {input["topic"]}
 Audience: {input["audience"]}
+Constraints: {input["constraints"]}
 Plan: {json.dumps(context.previous)}
 
 Return only JSON with keys:
@@ -167,6 +304,7 @@ review_score must be a number between 0 and 1.
         brief = await _run_json_agent(
             reasoning_agent,
             context=context,
+            schema=SYNTHESIZE_SCHEMA,
             prompt=f"""
 TASK: synthesize
 Act as a reasoning-heavy launch strategist. Synthesize the parallel agent
@@ -174,6 +312,7 @@ outputs into one launch brief for the portfolio page.
 
 Topic: {input["topic"]}
 Audience: {input["audience"]}
+Constraints: {input["constraints"]}
 Parallel outputs: {json.dumps(branches)}
 
 Return only JSON with keys:
@@ -194,6 +333,7 @@ quality_score must be a number between 0 and 1.
         output = await _run_json_agent(
             reasoning_agent,
             context=context,
+            schema=FINAL_SUMMARY_SCHEMA,
             prompt=f"""
 TASK: publish_ready
 Write the final compact visitor-facing summary for this launch brief.
@@ -213,8 +353,9 @@ why_orchflow must be an array of exactly three strings.
     @step(name="revise", retry=2)
     async def revise(input: dict[str, str], context: StepContext) -> dict[str, Any]:
         output = await _run_json_agent(
-            haiku_agent,
+            fast_agent,
             context=context,
+            schema=FINAL_SUMMARY_SCHEMA,
             prompt=f"""
 TASK: revise
 Explain why this launch brief needs revision before publishing.
@@ -242,8 +383,9 @@ why_orchflow must be an array of exactly three strings.
             "summary": output["summary"],
             "why_orchflow": output["why_orchflow"],
             "models": {
-                "fast_parallel_steps": settings.anthropic_model,
-                "reasoning_steps": settings.openai_model,
+                "preset": model_preset.value,
+                "fast_parallel_steps": fast_model,
+                "reasoning_steps": reasoning_model,
             },
         }
 
@@ -264,17 +406,23 @@ why_orchflow must be an array of exactly three strings.
     )
 
 
-def _build_agents(settings: Settings) -> tuple[Agent, Agent]:
-    haiku_agent = Agent(
-        name="haiku_researcher",
+def _build_agents(
+    settings: Settings,
+    *,
+    fast_model: str,
+    reasoning_model: str,
+) -> tuple[Agent, Agent]:
+    fast_agent = Agent(
+        name="fast_researcher",
         role=(
             "You are a precise portfolio-demo agent. Return only valid JSON. "
             "Do not wrap JSON in Markdown."
         ),
         config=AgentConfig(
-            model=settings.anthropic_model,
-            temperature=0.2,
+            model=fast_model,
+            temperature=0,
             max_tokens=600,
+            api_key=_api_key_for_model(settings, fast_model),
             timeout=settings.llm_timeout_seconds,
             extra={"drop_params": True},
         ),
@@ -286,13 +434,33 @@ def _build_agents(settings: Settings) -> tuple[Agent, Agent]:
             "Return only valid JSON. Do not wrap JSON in Markdown."
         ),
         config=AgentConfig(
-            model=settings.openai_model,
+            model=reasoning_model,
             max_tokens=700,
+            api_key=_api_key_for_model(settings, reasoning_model),
             timeout=settings.llm_timeout_seconds,
             extra={"drop_params": True},
         ),
     )
-    return haiku_agent, reasoning_agent
+    return fast_agent, reasoning_agent
+
+
+def _models_for_preset(
+    settings: Settings,
+    model_preset: OrchflowModelPreset,
+) -> tuple[str, str]:
+    if model_preset is OrchflowModelPreset.haiku_only:
+        return settings.anthropic_model, settings.anthropic_model
+    if model_preset is OrchflowModelPreset.o4_mini_only:
+        return settings.openai_model, settings.openai_model
+    return settings.anthropic_model, settings.openai_model
+
+
+def _api_key_for_model(settings: Settings, model: str) -> str | None:
+    if model.startswith("anthropic/"):
+        return settings.anthropic_api_key
+    if model.startswith("openai/"):
+        return settings.openai_api_key
+    return None
 
 
 async def _run_json_agent(
@@ -300,11 +468,128 @@ async def _run_json_agent(
     *,
     context: StepContext,
     prompt: str,
+    schema: dict[str, Any],
 ) -> dict[str, Any]:
-    content = await agent.run(prompt.strip(), context=context)
-    parsed = _parse_json_object(content)
-    parsed["model_note"] = parsed.get("model_note") or agent.name
+    structured_prompt = _json_contract_prompt(prompt, schema)
+    try:
+        parsed = await agent.run_structured(
+            structured_prompt,
+            schema=schema,
+            context=context,
+        )
+        return _finalize_json_object(parsed, schema=schema, agent_name=agent.name)
+    except Exception as exc:
+        if not _can_retry_without_response_format(exc):
+            raise
+
+    content = await agent.run(structured_prompt, context=context)
+    last_error: ValueError | None = None
+    for repair_index in range(JSON_REPAIR_ATTEMPTS + 1):
+        try:
+            parsed = _parse_json_object(content)
+            return _finalize_json_object(parsed, schema=schema, agent_name=agent.name)
+        except ValueError as error:
+            last_error = error
+            if repair_index >= JSON_REPAIR_ATTEMPTS:
+                raise
+            content = await agent.run(
+                _json_repair_prompt(
+                    original_prompt=prompt,
+                    invalid_content=content,
+                    schema=schema,
+                    error=error,
+                ),
+                context=context,
+            )
+
+    raise RuntimeError("JSON repair loop exited unexpectedly") from last_error
+
+
+def _json_contract_prompt(prompt: str, schema: dict[str, Any]) -> str:
+    return f"""
+{prompt.strip()}
+
+JSON CONTRACT:
+Return exactly one JSON object and no prose, Markdown, code fences, or comments.
+Use double-quoted JSON strings. Keep values concise.
+Required JSON schema:
+{json.dumps(schema, ensure_ascii=False)}
+""".strip()
+
+
+def _json_repair_prompt(
+    *,
+    original_prompt: str,
+    invalid_content: str,
+    schema: dict[str, Any],
+    error: Exception,
+) -> str:
+    return f"""
+Convert the model output below into exactly one valid JSON object.
+Do not add prose, Markdown, code fences, or comments.
+
+Original task:
+{original_prompt.strip()}
+
+Validation error:
+{error}
+
+Required JSON schema:
+{json.dumps(schema, ensure_ascii=False)}
+
+Model output to convert:
+{invalid_content}
+""".strip()
+
+
+def _can_retry_without_response_format(exc: Exception) -> bool:
+    if isinstance(exc, (StructuredOutputError, ValueError)):
+        return True
+    message = str(exc).lower()
+    return (
+        "response_format" in message
+        or "json_schema" in message
+        or "not supported" in message
+        or "unsupported" in message
+    )
+
+
+def _finalize_json_object(
+    value: Any,
+    *,
+    schema: dict[str, Any],
+    agent_name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("LLM output JSON must be an object")
+
+    parsed = cast(dict[str, Any], value)
+    _validate_required_schema(parsed, schema=schema)
+    parsed["model_note"] = parsed.get("model_note") or agent_name
     return parsed
+
+
+def _validate_required_schema(value: dict[str, Any], *, schema: dict[str, Any]) -> None:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+
+    required = schema.get("required", [])
+    if isinstance(required, list):
+        for key in required:
+            if isinstance(key, str) and key not in value:
+                raise ValueError(f"LLM output missing required JSON key: {key}")
+
+    for key, config in properties.items():
+        if not isinstance(key, str) or key not in value or not isinstance(config, dict):
+            continue
+        expected_type = config.get("type")
+        if expected_type == "string" and not isinstance(value[key], str):
+            raise ValueError(f"JSON key {key} must be a string")
+        if expected_type == "number" and not isinstance(value[key], int | float):
+            raise ValueError(f"JSON key {key} must be a number")
+        if expected_type == "array" and not isinstance(value[key], list):
+            raise ValueError(f"JSON key {key} must be an array")
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:
@@ -338,6 +623,7 @@ def _coerce_score(value: Any, fallback: float) -> float:
 def _event_envelope(event: FlowEvent, *, phase: str) -> EventEnvelope:
     payload = event.to_dict()
     metadata = payload.get("metadata") or {}
+    trace = _public_trace(payload.get("trace"))
     return {
         "phase": phase,
         "type": payload["type"],
@@ -349,9 +635,9 @@ def _event_envelope(event: FlowEvent, *, phase: str) -> EventEnvelope:
         "attempt": payload.get("attempt"),
         "parallel_group_id": payload.get("parallel_group_id"),
         "output": payload.get("output"),
-        "error": payload.get("error"),
+        "error": _public_error(payload.get("error")),
         "retry_delay": payload.get("retry_delay"),
-        "trace": payload.get("trace"),
+        "trace": trace,
         "checkpoint": _checkpoint_metadata(metadata, event_type=payload["type"]),
         "final_result": payload.get("result"),
     }
@@ -371,3 +657,22 @@ def _checkpoint_metadata(
         "status": metadata.get("status"),
         "next_step_index": metadata.get("next_step_index"),
     }
+
+
+def _public_trace(trace: Any) -> Any:
+    if not isinstance(trace, dict):
+        return trace
+    sanitized = dict(trace)
+    sanitized["error"] = _public_error(sanitized.get("error"))
+    return sanitized
+
+
+def _public_error(error: Any) -> str | None:
+    if not isinstance(error, str) or not error:
+        return None
+    if "Incorrect API key" in error or "AuthenticationError" in error:
+        return (
+            "OpenAI authentication failed. Check the backend "
+            "DEMOS_API_OPENAI_API_KEY or OPENAI_API_KEY value."
+        )
+    return error

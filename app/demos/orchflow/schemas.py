@@ -10,6 +10,12 @@ class OrchflowRunMode(StrEnum):
     failure_resume = "failure_resume"
 
 
+class OrchflowModelPreset(StrEnum):
+    balanced = "balanced"
+    haiku_only = "haiku_only"
+    o4_mini_only = "o4_mini_only"
+
+
 class OrchflowRunRequest(BaseModel):
     topic: str = Field(
         default="AI code review assistant",
@@ -21,7 +27,12 @@ class OrchflowRunRequest(BaseModel):
         min_length=2,
         max_length=120,
     )
+    constraints: str = Field(
+        default="Keep the final brief practical, specific, and easy to scan.",
+        max_length=240,
+    )
     mode: OrchflowRunMode = OrchflowRunMode.success
+    model_preset: OrchflowModelPreset = OrchflowModelPreset.balanced
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -29,4 +40,6 @@ class OrchflowRunRequest(BaseModel):
         return {
             "topic": self.topic,
             "audience": self.audience,
+            "constraints": self.constraints,
+            "model_preset": self.model_preset.value,
         }

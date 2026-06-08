@@ -135,6 +135,18 @@ async def test_healthz() -> None:
 
 
 @pytest.mark.asyncio
+async def test_root_describes_api() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["docs"] == "/docs"
+    assert response.json()["demos"]["orchflow"] == "/demos/orchflow/run"
+
+
+@pytest.mark.asyncio
 async def test_orchflow_success_streams_parallel_traces_and_result() -> None:
     events = await _stream_events(
         {

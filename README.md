@@ -51,7 +51,8 @@ uv run pyright
 
 This app includes a Dockerfile based on `python:3.11-slim-bookworm` with the
 `uv` binary copied from Astral's official GHCR image. Railway will build the
-Dockerfile and start Uvicorn with the platform-provided `PORT`.
+Dockerfile and start Uvicorn with the platform-provided `PORT`. The image
+exposes port `8080`, matching Railway's default container port.
 
 Set these environment variables as needed:
 

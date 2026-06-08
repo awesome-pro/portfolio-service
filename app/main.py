@@ -28,6 +28,19 @@ def create_app() -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/", tags=["health"])
+    async def root() -> dict[str, object]:
+        return {
+            "status": "ok",
+            "service": settings.app_name,
+            "docs": "/docs",
+            "health": "/healthz",
+            "demos": {
+                "orchflow": "/demos/orchflow/run",
+                "agenteval": "/demos/agenteval/run",
+            },
+        }
+
     app.include_router(api_router)
     return app
 

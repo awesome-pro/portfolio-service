@@ -49,8 +49,9 @@ uv run pyright
 
 ## Railway
 
-This app includes a Dockerfile based on Astral's `uv` Python image. Railway will
-build the Dockerfile and start Uvicorn with the platform-provided `PORT`.
+This app includes a Dockerfile based on `python:3.11-slim-bookworm` with the
+`uv` binary copied from Astral's official GHCR image. Railway will build the
+Dockerfile and start Uvicorn with the platform-provided `PORT`.
 
 Set these environment variables as needed:
 

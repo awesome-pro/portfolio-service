@@ -6,10 +6,15 @@ import urllib.request
 from collections.abc import AsyncIterator
 
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.core.config import Settings, get_settings
+from app.core.rate_limit import (
+    agenteval_rate_limiter,
+    client_rate_limit_key,
+    raise_rate_limit_exceeded,
+)
 from app.demos.agenteval.schemas import AgentEvalProvider, AgentEvalRunRequest
 from app.demos.agenteval.workflow import encode_ndjson, iter_agenteval_demo_events
 
@@ -17,8 +22,19 @@ router = APIRouter()
 
 
 @router.post("/run")
-async def run_agenteval_demo(request: AgentEvalRunRequest) -> StreamingResponse:
+async def run_agenteval_demo(
+    request: AgentEvalRunRequest,
+    http_request: Request,
+) -> StreamingResponse:
     settings = get_settings()
+    decision = agenteval_rate_limiter.check(
+        client_rate_limit_key(http_request),
+        max_runs=settings.agenteval_rate_limit_max_runs,
+        window_seconds=settings.agenteval_rate_limit_window_seconds,
+    )
+    if not decision.allowed:
+        raise_rate_limit_exceeded(decision.retry_after_seconds)
+
     missing_key = None
     if request.provider == "openai" and not settings.openai_api_key:
         missing_key = "OPENAI_API_KEY"

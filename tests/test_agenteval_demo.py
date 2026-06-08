@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from app.core.config import get_settings
+from app.core.rate_limit import agenteval_rate_limiter
 from app.demos.agenteval import routes as agenteval_routes
 from app.main import app
 from fastapi import HTTPException
@@ -15,7 +16,8 @@ from httpx import ASGITransport, AsyncClient
 
 
 @pytest.fixture(autouse=True)
-def fake_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+def fake_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    agenteval_rate_limiter.reset()
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     get_settings.cache_clear()
@@ -86,6 +88,8 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> None:
         "litellm",
         SimpleNamespace(acompletion=acompletion, calls=calls),
     )
+    yield
+    agenteval_rate_limiter.reset()
 
 
 async def _stream_events(payload: dict[str, object]) -> list[dict[str, object]]:
@@ -258,3 +262,32 @@ async def test_agenteval_run_reports_invalid_provider_key_once(
 
     assert response.status_code == 503
     assert "OpenAI authentication failed" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_agenteval_rate_limits_run_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEMOS_API_AGENTEVAL_RATE_LIMIT_MAX_RUNS", "2")
+    monkeypatch.setenv("DEMOS_API_AGENTEVAL_RATE_LIMIT_WINDOW_SECONDS", "60")
+    get_settings.cache_clear()
+    agenteval_rate_limiter.reset()
+
+    payload = {
+        "message": "I want a refund for order A1007",
+        "mode": "healthy",
+        "provider": "openai",
+        "n_runs": 3,
+        "threshold": 0.8,
+    }
+
+    await _stream_events(payload)
+    await _stream_events(payload)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/demos/agenteval/run", json=payload)
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"]
+    assert "Demo rate limit reached" in response.json()["detail"]

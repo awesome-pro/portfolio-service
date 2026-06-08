@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 45.0
     orchflow_rate_limit_max_runs: int = 5
     orchflow_rate_limit_window_seconds: int = 600
+    agenteval_rate_limit_max_runs: int = 4
+    agenteval_rate_limit_window_seconds: int = 600
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "https://abhinandan.one"]
     )

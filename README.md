@@ -3,13 +3,16 @@
 FastAPI backend for interactive demos embedded in
 [abhinandan.one](https://abhinandan.one). The Orchflow demo powers a live
 workflow run with provider-backed agent steps, safe model presets, and basic
-per-IP rate limiting.
+per-IP rate limiting. The AgentEval demo runs a live refund-support reliability
+gate with repeated `agenteval-py` traces, provider adapters, and the same
+rate-limited public API boundary.
 
 ## Stack
 
 - `uv` for Python, dependency locking, and local commands
 - FastAPI + Uvicorn
 - `orchflow[litellm]==0.5.0` from PyPI
+- `agenteval-py>=0.1.1` from PyPI
 - Anthropic Haiku for fast planning/research/review steps
 - OpenAI o4-mini for synthesis/finalization steps
 - Pytest, Ruff, and Pyright for quality checks
@@ -39,6 +42,23 @@ Allowed Orchflow model presets are `balanced`, `haiku_only`, and
 `o4_mini_only`; arbitrary model names are intentionally not accepted from the
 browser.
 
+The AgentEval demo is also live and bounded:
+
+```bash
+curl -N http://127.0.0.1:8000/demos/agenteval/run \
+  -H 'content-type: application/json' \
+  -d '{
+    "message":"I want a refund for order A1007",
+    "provider":"openai",
+    "mode":"healthy",
+    "n_runs":6,
+    "threshold":0.8
+  }'
+```
+
+Allowed AgentEval providers are `openai` and `anthropic`; allowed modes are
+`healthy` and `regression`. The browser cannot submit arbitrary model names.
+
 ## Checks
 
 ```bash
@@ -67,5 +87,7 @@ Set these environment variables as needed:
 | `DEMOS_API_LLM_TIMEOUT_SECONDS` | `45` |
 | `DEMOS_API_ORCHFLOW_RATE_LIMIT_MAX_RUNS` | `5` |
 | `DEMOS_API_ORCHFLOW_RATE_LIMIT_WINDOW_SECONDS` | `600` |
+| `DEMOS_API_AGENTEVAL_RATE_LIMIT_MAX_RUNS` | `4` |
+| `DEMOS_API_AGENTEVAL_RATE_LIMIT_WINDOW_SECONDS` | `600` |
 | `DEMOS_API_CORS_ORIGINS` | `["http://localhost:3000", "https://abhinandan.one"]` |
 | `DEMOS_API_CORS_ORIGIN_REGEX` | `https://.*\\.vercel\\.app` |

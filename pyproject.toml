@@ -12,8 +12,22 @@ dependencies = [
     "orchflow[litellm]==0.5.0",
     "pydantic-settings>=2.14.1",
     "smartmemo[ml]>=0.3.0",
+    # Declared directly so the [tool.uv.sources] CPU-index override below binds
+    # (uv sources only apply to direct deps; torch is otherwise transitive).
+    "torch>=2.12.0",
     "uvicorn[standard]>=0.49.0",
 ]
+
+# Pull torch from PyTorch's CPU-only index. The default PyPI Linux wheel
+# depends on the full nvidia-* CUDA stack (several GB), which overflows the
+# Railway build. This backend has no GPU, so the CPU build is all we need.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [

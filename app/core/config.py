@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     orchflow_rate_limit_window_seconds: int = 600
     agenteval_rate_limit_max_runs: int = 4
     agenteval_rate_limit_window_seconds: int = 600
+    guardloop_rate_limit_max_runs: int = 12
+    guardloop_rate_limit_window_seconds: int = 600
+    guardloop_openai_model: str = "gpt-4o-mini"
+    guardloop_anthropic_model: str = "claude-3-haiku-20240307"
+    smartmemo_rate_limit_max_runs: int = 10
+    smartmemo_rate_limit_window_seconds: int = 600
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "https://abhinandan.one"]
     )

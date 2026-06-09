@@ -38,6 +38,8 @@ def create_app() -> FastAPI:
             "demos": {
                 "orchflow": "/demos/orchflow/run",
                 "agenteval": "/demos/agenteval/run",
+                "guardloop": "/demos/guardloop/run",
+                "smartmemo": "/demos/smartmemo/run",
             },
         }
 

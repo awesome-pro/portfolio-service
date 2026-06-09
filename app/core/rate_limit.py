@@ -57,6 +57,8 @@ class InMemoryRateLimiter:
 
 orchflow_rate_limiter = InMemoryRateLimiter()
 agenteval_rate_limiter = InMemoryRateLimiter()
+guardloop_rate_limiter = InMemoryRateLimiter()
+smartmemo_rate_limiter = InMemoryRateLimiter()
 
 
 def client_rate_limit_key(request: Request) -> str:
